@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <title>ChatGPT Token Extractor</title>
+  <style>
+    body {
+      width: 350px;
+      padding: 15px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f7f7f8;
+      color: #333;
+    }
+
+    h2 {
+      font-size: 16px;
+      margin-top: 0;
+      margin-bottom: 15px;
+      color: #10a37f;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .container {
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+
+    .field-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #666;
+    }
+
+    textarea {
+      width: 100%;
+      height: 60px;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 11px;
+      resize: vertical;
+      background-color: #fff;
+      box-sizing: border-box;
+    }
+
+    textarea:focus {
+      outline: none;
+      border-color: #10a37f;
+      box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.1);
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 12px;
+      box-sizing: border-box;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #10a37f;
+    }
+
+    .btn-group {
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    button {
+      background-color: #10a37f;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background-color 0.2s;
+    }
+
+    button:hover {
+      background-color: #0d8a6a;
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    .status {
+      font-size: 11px;
+      color: #888;
+      margin-top: 5px;
+      min-height: 14px;
+    }
+
+    .error {
+      color: #ef4146;
+    }
+
+    .success {
+      color: #10a37f;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path
+        d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM10 17L5 12L6.41 10.59L10 14.17L17.59 6.58L19 8L10 17Z"
+        fill="#10a37f" />
+    </svg>
+    Token Extractor
+  </h2>
+
+  <div class="container">
+    <div class="field-group">
+      <label for="cookie">Session Cookie (__Secure-next-auth.session-token)</label>
+      <textarea id="cookie" readonly placeholder="Fetching..."></textarea>
+      <div class="btn-group">
+        <button id="btn-copy-cookie">Copy Cookie</button>
+      </div>
+    </div>
+
+    <div class="field-group">
+      <label for="token">Access Token (from /api/auth/session)</label>
+      <textarea id="token" readonly placeholder="Fetching..."></textarea>
+      <div class="btn-group">
+        <button id="btn-copy-token">Copy Token</button>
+      </div>
+    </div>
+    <div class="field-group">
+      <label for="server-url">Sora2API Server URL</label>
+      <input type="text" id="server-url" value="http://127.0.0.1:8003" placeholder="http://127.0.0.1:8003">
+    </div>
+
+    <div class="field-group">
+      <label for="admin-key">Admin Key (Authorization)</label>
+      <input type="password" id="admin-key" value="han1234" placeholder="Enter Admin Key (Optional)">
+    </div>
+
+    <div class="field-group">
+      <label for="proxy-url">Proxy URL (Required)</label>
+      <input type="text" id="proxy-url" placeholder="http://user:pass@ip:port">
+    </div>
+
+    <div class="btn-group" style="margin-top: 5px;">
+      <button id="btn-upload" style="width: 100%; font-weight: bold; padding: 8px;">Upload to Server</button>
+    </div>
+  </div>
+
+  <div id="message" class="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>

@@ -55,14 +55,6 @@ flow2api-example
 # Temp/Debug files
 *.zip
 logs.txt
-debug_db.py
-fix_db_schema.py
-verify_*.py
-examples_*.py
-
-# Local dev tools
-local_proxy_server.py
-chatgpt_token_extractor/
 
 # Tmp folder
 tmp/
