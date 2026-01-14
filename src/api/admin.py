@@ -130,6 +130,7 @@ class UpdateProxyConfigRequest(BaseModel):
 class UpdateAdminPasswordRequest(BaseModel):
     old_password: str
     new_password: str
+    username: Optional[str] = None  # Optional: new username
 
 class UpdateSchedulingRequest(BaseModel):
     mode: str = "random"
