@@ -1,7 +1,7 @@
 """Load balancing module"""
 import asyncio
 import random
-from typing import Optional
+from typing import Optional, Dict
 from ..core.models import Token
 from ..core.config import config
 from .token_manager import TokenManager
@@ -17,15 +17,41 @@ class LoadBalancer:
         self.concurrency_manager = concurrency_manager
         # Use image timeout from config as lock timeout
         self.token_lock = TokenLock(lock_timeout=config.image_timeout)
-        # 轮询模式锁，防止并发请求选中同一个 token
+        # 轮询模式锁 - 只保护内存中的选择操作（极快）
         self._round_robin_lock = asyncio.Lock()
+        # 内存中的 usage_count 缓存，避免每次从数据库读取
+        self._usage_cache: Dict[int, int] = {}
+
+    def _get_cached_usage(self, token_id: int, db_usage: int) -> int:
+        """获取缓存中的 usage_count，如果不存在则用数据库值初始化"""
+        if token_id not in self._usage_cache:
+            self._usage_cache[token_id] = db_usage
+        return self._usage_cache[token_id]
+
+    async def sync_usage_cache_from_db(self):
+        """从数据库同步 usage_count 缓存（用于启动时或重置后）"""
+        try:
+            all_tokens = await self.token_manager.get_all_tokens()
+            for token in all_tokens:
+                self._usage_cache[token.id] = token.usage_count or 0
+            debug_logger.log_info(f"[LOAD_BALANCER] ✅ 已同步 {len(all_tokens)} 个 Token 的 usage_count 缓存")
+        except Exception as e:
+            debug_logger.log_error(f"[LOAD_BALANCER] 同步 usage_count 缓存失败: {e}")
+
+    async def reset_usage_cache(self):
+        """重置内存缓存（与数据库重置同步）"""
+        self._usage_cache.clear()
+        debug_logger.log_info("[LOAD_BALANCER] 🔄 已清空 usage_count 内存缓存")
 
     async def _select_round_robin(self, available_tokens: list, for_image: bool = False, for_video: bool = False) -> Optional[Token]:
         """
-        使用互斥锁选择轮询模式下的 token，防止并发竞争
+        轮询模式选择 token - 高性能版本
+        
+        使用内存缓存的 usage_count，锁只保护"选择+计数增加"这个纯内存操作（微秒级）
+        不会阻塞并发请求
         
         Args:
-            available_tokens: 可用的 token 列表（仅用于获取 ID）
+            available_tokens: 可用的 token 列表
             for_image: 是否用于图片生成
             for_video: 是否用于视频生成
             
@@ -34,34 +60,35 @@ class LoadBalancer:
         """
         if not available_tokens:
             return None
-            
+        
+        # 锁内只做纯内存操作，极快（微秒级）
         async with self._round_robin_lock:
-            # 在锁内重新获取最新的 token 数据，确保 usage_count 是最新的
-            token_ids = [t.id for t in available_tokens]
-            fresh_tokens = []
+            # 使用内存缓存获取 usage_count
+            token_with_usage = []
+            for token in available_tokens:
+                cached_usage = self._get_cached_usage(token.id, token.usage_count or 0)
+                token_with_usage.append((token, cached_usage))
             
-            for token_id in token_ids:
-                token = await self.token_manager.db.get_token(token_id)
-                if token and token.is_active:
-                    # 额外检查（如 cooldown 等可能在等待锁期间发生变化）
-                    if for_video:
-                        from datetime import datetime
-                        if token.sora2_cooldown_until and token.sora2_cooldown_until > datetime.now():
-                            continue
-                    fresh_tokens.append(token)
+            # 按 usage_count 升序排序
+            token_with_usage.sort(key=lambda x: x[1])
+            selected_token, current_usage = token_with_usage[0]
             
-            if not fresh_tokens:
-                return None
-            
-            # 按 usage_count 升序排序，选择使用次数最少的
-            fresh_tokens.sort(key=lambda t: t.usage_count if t.usage_count is not None else 0)
-            selected_token = fresh_tokens[0]
-            
-            # 立即增加 usage_count
-            await self.token_manager.increment_usage_count(selected_token.id)
-            debug_logger.log_info(f"[LOAD_BALANCER] 🔄 轮询模式: 选中 Token {selected_token.id} ({selected_token.email}), usage_count: {selected_token.usage_count}")
-            
-            return selected_token
+            # 立即在内存中增加计数（这是并发安全的关键）
+            self._usage_cache[selected_token.id] = current_usage + 1
+        
+        # 锁外异步更新数据库（fire-and-forget，不阻塞）
+        asyncio.create_task(self._async_increment_db_usage(selected_token.id))
+        
+        debug_logger.log_info(f"[LOAD_BALANCER] 🔄 轮询模式: 选中 Token {selected_token.id} ({selected_token.email}), usage_count: {current_usage} -> {current_usage + 1}")
+        
+        return selected_token
+
+    async def _async_increment_db_usage(self, token_id: int):
+        """异步更新数据库中的 usage_count（不阻塞主流程）"""
+        try:
+            await self.token_manager.increment_usage_count(token_id)
+        except Exception as e:
+            debug_logger.log_error(f"[LOAD_BALANCER] 异步更新 usage_count 失败: {e}")
 
     async def select_token(self, for_image_generation: bool = False, for_video_generation: bool = False, require_pro: bool = False) -> Optional[Token]:
         """

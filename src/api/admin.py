@@ -803,6 +803,9 @@ async def reset_usage_counts_route(token: str = Depends(verify_admin_token)):
     """Reset all token usage counts"""
     try:
         await token_manager.reset_all_usage_counts()
+        # 同时清空 load_balancer 的内存缓存
+        if generation_handler and generation_handler.load_balancer:
+            await generation_handler.load_balancer.reset_usage_cache()
         return {"success": True, "message": "所有 Token 轮询次数已清空"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
