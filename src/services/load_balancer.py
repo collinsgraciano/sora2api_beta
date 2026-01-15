@@ -1,4 +1,5 @@
 """Load balancing module"""
+import asyncio
 import random
 from typing import Optional
 from ..core.models import Token
@@ -16,6 +17,51 @@ class LoadBalancer:
         self.concurrency_manager = concurrency_manager
         # Use image timeout from config as lock timeout
         self.token_lock = TokenLock(lock_timeout=config.image_timeout)
+        # 轮询模式锁，防止并发请求选中同一个 token
+        self._round_robin_lock = asyncio.Lock()
+
+    async def _select_round_robin(self, available_tokens: list, for_image: bool = False, for_video: bool = False) -> Optional[Token]:
+        """
+        使用互斥锁选择轮询模式下的 token，防止并发竞争
+        
+        Args:
+            available_tokens: 可用的 token 列表（仅用于获取 ID）
+            for_image: 是否用于图片生成
+            for_video: 是否用于视频生成
+            
+        Returns:
+            选中的 token，或 None
+        """
+        if not available_tokens:
+            return None
+            
+        async with self._round_robin_lock:
+            # 在锁内重新获取最新的 token 数据，确保 usage_count 是最新的
+            token_ids = [t.id for t in available_tokens]
+            fresh_tokens = []
+            
+            for token_id in token_ids:
+                token = await self.token_manager.db.get_token(token_id)
+                if token and token.is_active:
+                    # 额外检查（如 cooldown 等可能在等待锁期间发生变化）
+                    if for_video:
+                        from datetime import datetime
+                        if token.sora2_cooldown_until and token.sora2_cooldown_until > datetime.now():
+                            continue
+                    fresh_tokens.append(token)
+            
+            if not fresh_tokens:
+                return None
+            
+            # 按 usage_count 升序排序，选择使用次数最少的
+            fresh_tokens.sort(key=lambda t: t.usage_count if t.usage_count is not None else 0)
+            selected_token = fresh_tokens[0]
+            
+            # 立即增加 usage_count
+            await self.token_manager.increment_usage_count(selected_token.id)
+            debug_logger.log_info(f"[LOAD_BALANCER] 🔄 轮询模式: 选中 Token {selected_token.id} ({selected_token.email}), usage_count: {selected_token.usage_count}")
+            
+            return selected_token
 
     async def select_token(self, for_image_generation: bool = False, for_video_generation: bool = False, require_pro: bool = False) -> Optional[Token]:
         """
@@ -115,22 +161,11 @@ class LoadBalancer:
             # Determine selection strategy based on admin config
             scheduling_mode = await self.token_manager.get_scheduling_mode()
             
-            selected_token = None
             if scheduling_mode == "round_robin":
-                # Sort by usage_count ASC, then random for tie-breaking? Or ID for stability
-                # For round-robin, we want strictly the one with least usage
-                available_tokens.sort(key=lambda t: t.usage_count if t.usage_count is not None else 0)
-                selected_token = available_tokens[0]
-                
-                # Increment usage count immediately to mark it as "used" in this round
-                # This ensures next request won't pick it (assuming DB update is fast)
-                # Note: This is fire-and-forget to avoid blocking too much, 
-                # but await is safer to ensure consistency
-                await self.token_manager.increment_usage_count(selected_token.id)
+                # 使用互斥锁保护的轮询选择
+                return await self._select_round_robin(available_tokens, for_image=True)
             else:
-                selected_token = random.choice(available_tokens)
-                
-            return selected_token
+                return random.choice(available_tokens)
         else:
             # For video generation, check concurrency limit
             if for_video_generation and self.concurrency_manager:
@@ -141,14 +176,11 @@ class LoadBalancer:
                 if not available_tokens:
                     return None
                 
-                # Consolidate logic for video generation too
+                # Determine selection strategy based on admin config
                 scheduling_mode = await self.token_manager.get_scheduling_mode()
                 if scheduling_mode == "round_robin":
-                    available_tokens.sort(key=lambda t: t.usage_count if t.usage_count is not None else 0)
-                    selected_token = available_tokens[0]
-                    debug_logger.log_info(f"[LOAD_BALANCER] Selected token {selected_token.id} (usage: {selected_token.usage_count})")
-                    await self.token_manager.increment_usage_count(selected_token.id)
-                    return selected_token
+                    # 使用互斥锁保护的轮询选择
+                    return await self._select_round_robin(available_tokens, for_video=True)
                 else:
                     return random.choice(available_tokens)
             else:
@@ -156,10 +188,8 @@ class LoadBalancer:
                 # Also apply scheduling mode
                 scheduling_mode = await self.token_manager.get_scheduling_mode()
                 if scheduling_mode == "round_robin":
-                    active_tokens.sort(key=lambda t: t.usage_count if t.usage_count is not None else 0)
-                    selected_token = active_tokens[0]
-                    debug_logger.log_info(f"[LOAD_BALANCER] Selected token {selected_token.id} (usage: {selected_token.usage_count})")
-                    await self.token_manager.increment_usage_count(selected_token.id)
-                    return selected_token
+                    # 使用互斥锁保护的轮询选择
+                    return await self._select_round_robin(active_tokens, for_video=for_video_generation)
                 else:
                     return random.choice(active_tokens)
+
