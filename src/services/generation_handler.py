@@ -633,6 +633,8 @@ class GenerationHandler:
 
         task_id = None
         is_first_chunk = True  # Track if this is the first chunk
+        generation_success = False  # 跟踪生成是否成功完成
+        error_obj = None  # 记录错误对象
 
         try:
             # Upload image if provided
@@ -746,94 +748,128 @@ class GenerationHandler:
             async for chunk in self._poll_task_result(task_id, token_obj.token, is_video, stream, prompt, token_obj.id):
                 yield chunk
             
-            # Record success
-            await self.token_manager.record_success(token_obj.id, is_video=is_video)
-
-            # Release lock for image generation
-            if is_image:
-                await self.load_balancer.token_lock.release_lock(token_obj.id)
-                # Release concurrency slot for image generation
-                if self.concurrency_manager:
-                    await self.concurrency_manager.release_image(token_obj.id)
-
-            # Release concurrency slot for video generation
-            if is_video and self.concurrency_manager:
-                await self.concurrency_manager.release_video(token_obj.id)
-
-            # Log successful request with complete task info
-            duration = time.time() - start_time
-
-            # Get complete task info from database
-            task_info = await self.db.get_task(task_id)
-            response_data = {
-                "task_id": task_id,
-                "status": "success",
-                "prompt": prompt,
-                "model": model
-            }
-
-            # Add result_urls if available
-            if task_info and task_info.result_urls:
-                try:
-                    result_urls = json.loads(task_info.result_urls)
-                    response_data["result_urls"] = result_urls
-                except:
-                    response_data["result_urls"] = task_info.result_urls
-
-            # Update log entry with completion data
-            if log_id:
-                await self.db.update_request_log(
-                    log_id,
-                    response_body=json.dumps(response_data),
-                    status_code=200,
-                    duration=duration
-                )
+            # 标记生成成功完成
+            generation_success = True
 
         except Exception as e:
-            # Release lock for image generation on error
-            if is_image and token_obj:
-                await self.load_balancer.token_lock.release_lock(token_obj.id)
-                # Release concurrency slot for image generation
-                if self.concurrency_manager:
-                    await self.concurrency_manager.release_image(token_obj.id)
-
-            # Release concurrency slot for video generation on error
-            if is_video and token_obj and self.concurrency_manager:
-                await self.concurrency_manager.release_video(token_obj.id)
-
-            # Record error (check if it's an overload error)
-            if token_obj:
-                error_str = str(e).lower()
-                is_overload = "heavy_load" in error_str or "under heavy load" in error_str
-                await self.token_manager.record_error(token_obj.id, is_overload=is_overload)
-
-            # Parse error message to check if it's a structured error (JSON)
-            error_response = None
-            try:
-                error_response = json.loads(str(e))
-            except:
-                pass
-
-            # Update log entry with error data
-            duration = time.time() - start_time
-            if log_id:
-                if error_response:
-                    # Structured error (e.g., unsupported_country_code)
-                    await self.db.update_request_log(
-                        log_id,
-                        response_body=json.dumps(error_response),
-                        status_code=400,
-                        duration=duration
-                    )
-                else:
-                    # Generic error
-                    await self.db.update_request_log(
-                        log_id,
-                        response_body=json.dumps({"error": str(e)}),
-                        status_code=500,
-                        duration=duration
-                    )
+            error_obj = e
             raise e
+
+        finally:
+            # 确保无论如何都执行清理和日志更新
+            try:
+                # 释放资源
+                if is_image and token_obj:
+                    await self.load_balancer.token_lock.release_lock(token_obj.id)
+                    if self.concurrency_manager:
+                        await self.concurrency_manager.release_image(token_obj.id)
+                
+                if is_video and token_obj and self.concurrency_manager:
+                    await self.concurrency_manager.release_video(token_obj.id)
+                
+                # 更新日志
+                duration = time.time() - start_time
+                
+                if generation_success:
+                    # 记录成功
+                    if token_obj:
+                        await self.token_manager.record_success(token_obj.id, is_video=is_video)
+                    
+                    # 获取任务信息并更新日志
+                    if log_id and task_id:
+                        task_info = await self.db.get_task(task_id)
+                        response_data = {
+                            "task_id": task_id,
+                            "status": "success",
+                            "prompt": prompt,
+                            "model": model
+                        }
+                        
+                        if task_info and task_info.result_urls:
+                            try:
+                                result_urls = json.loads(task_info.result_urls)
+                                response_data["result_urls"] = result_urls
+                            except:
+                                response_data["result_urls"] = task_info.result_urls
+                        
+                        await self.db.update_request_log(
+                            log_id,
+                            response_body=json.dumps(response_data),
+                            status_code=200,
+                            duration=duration
+                        )
+                        debug_logger.log_info(f"[GENERATION] ✅ 日志已更新为成功: log_id={log_id}, task_id={task_id}")
+                
+                elif error_obj:
+                    # 记录错误
+                    if token_obj:
+                        error_str = str(error_obj).lower()
+                        is_overload = "heavy_load" in error_str or "under heavy load" in error_str
+                        await self.token_manager.record_error(token_obj.id, is_overload=is_overload)
+                    
+                    # 更新日志
+                    if log_id:
+                        error_response = None
+                        try:
+                            error_response = json.loads(str(error_obj))
+                        except:
+                            pass
+                        
+                        if error_response:
+                            await self.db.update_request_log(
+                                log_id,
+                                response_body=json.dumps(error_response),
+                                status_code=400,
+                                duration=duration
+                            )
+                        else:
+                            await self.db.update_request_log(
+                                log_id,
+                                response_body=json.dumps({"error": str(error_obj)}),
+                                status_code=500,
+                                duration=duration
+                            )
+                        debug_logger.log_info(f"[GENERATION] ❌ 日志已更新为失败: log_id={log_id}, error={str(error_obj)[:100]}")
+                
+                else:
+                    # 生成器被提前终止（如客户端断开连接），但没有抛出异常
+                    # 检查任务状态来确定最终结果
+                    if log_id and task_id:
+                        task_info = await self.db.get_task(task_id)
+                        if task_info and task_info.status in ["completed", "success"]:
+                            # 任务实际已完成
+                            response_data = {
+                                "task_id": task_id,
+                                "status": "success",
+                                "prompt": prompt,
+                                "model": model
+                            }
+                            if task_info.result_urls:
+                                try:
+                                    response_data["result_urls"] = json.loads(task_info.result_urls)
+                                except:
+                                    response_data["result_urls"] = task_info.result_urls
+                            
+                            await self.db.update_request_log(
+                                log_id,
+                                response_body=json.dumps(response_data),
+                                status_code=200,
+                                duration=duration
+                            )
+                            if token_obj:
+                                await self.token_manager.record_success(token_obj.id, is_video=is_video)
+                            debug_logger.log_info(f"[GENERATION] ✅ 生成器提前终止但任务已完成: log_id={log_id}")
+                        else:
+                            # 任务未完成，记录为中断
+                            await self.db.update_request_log(
+                                log_id,
+                                response_body=json.dumps({"error": "Generation interrupted (client disconnected)"}),
+                                status_code=499,  # Client Closed Request
+                                duration=duration
+                            )
+                            debug_logger.log_info(f"[GENERATION] ⚠️ 生成被中断: log_id={log_id}")
+            except Exception as cleanup_error:
+                debug_logger.log_error(f"[GENERATION] 清理过程中出错: {str(cleanup_error)}")
     
     async def _poll_task_result(self, task_id: str, token: str, is_video: bool,
                                 stream: bool, prompt: str, token_id: int = None) -> AsyncGenerator[str, None]:
