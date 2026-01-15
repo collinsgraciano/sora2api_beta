@@ -856,6 +856,74 @@ async def get_logs(limit: int = 100, token: str = Depends(verify_admin_token)):
             if task:
                 log_data["progress"] = task.progress
                 log_data["task_status"] = task.status
+                
+                # 自动修复：如果任务已完成但日志仍为"生成中"
+                if task.status in ["completed", "success"]:
+                    # 计算实际耗时
+                    import json as json_module
+                    from datetime import datetime
+                    try:
+                        created_at = log.get("created_at")
+                        if isinstance(created_at, str):
+                            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        completed_at = task.completed_at or datetime.now()
+                        actual_duration = (completed_at - created_at).total_seconds() if created_at else 0
+                        
+                        response_data = {
+                            "task_id": task.task_id,
+                            "status": "success",
+                            "auto_fixed": True  # 标记为自动修复
+                        }
+                        if task.result_urls:
+                            try:
+                                response_data["result_urls"] = json_module.loads(task.result_urls)
+                            except:
+                                response_data["result_urls"] = task.result_urls
+                        
+                        # 更新日志
+                        await db.update_request_log(
+                            log.get("id"),
+                            response_body=json_module.dumps(response_data),
+                            status_code=200,
+                            duration=actual_duration
+                        )
+                        
+                        # 更新本次返回的数据
+                        log_data["status_code"] = 200
+                        log_data["duration"] = actual_duration
+                        log_data["response_body"] = json_module.dumps(response_data)
+                        log_data["auto_fixed"] = True
+                    except Exception as fix_error:
+                        print(f"Auto-fix log failed: {fix_error}")
+                
+                elif task.status == "failed":
+                    # 任务失败，更新日志
+                    import json as json_module
+                    from datetime import datetime
+                    try:
+                        created_at = log.get("created_at")
+                        if isinstance(created_at, str):
+                            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        actual_duration = (datetime.now() - created_at).total_seconds() if created_at else 0
+                        
+                        response_data = {
+                            "error": task.error_message or "Generation failed",
+                            "auto_fixed": True
+                        }
+                        
+                        await db.update_request_log(
+                            log.get("id"),
+                            response_body=json_module.dumps(response_data),
+                            status_code=500,
+                            duration=actual_duration
+                        )
+                        
+                        log_data["status_code"] = 500
+                        log_data["duration"] = actual_duration
+                        log_data["response_body"] = json_module.dumps(response_data)
+                        log_data["auto_fixed"] = True
+                    except Exception as fix_error:
+                        print(f"Auto-fix log failed: {fix_error}")
 
         result.append(log_data)
 
